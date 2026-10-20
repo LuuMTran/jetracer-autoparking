@@ -1,0 +1,15 @@
+{
+  "hardware": {
+    "driver": "jetracer.nvidia_racecar:NvidiaRacecar",
+    "calibration_confirmed": false,
+    "steering_gain": -0.65,
+    "steering_offset": 0.0,
+    "throttle_gain": 0.8,
+    "right_steering_sign": 1,
+    "notes": "Example values only. Verify the installed driver for your exact Waveshare kit."
+  },
+  "limits": {"steering": 0.60, "forward": 0.12, "reverse": 0.12},
+  "control": {"hz": 10, "max_frame_age_s": 0.25, "max_episode_s": 60},
+  "camera": {"width": 640, "height": 480, "capture_fps": 30, "capture_device": 0},
+  "gamepad": {"index": 0, "steering_axis": 0, "throttle_axis": 1, "steering_sign": 1, "throttle_sign": -1, "deadzone": 0.08, "deadman_button": 4, "stop_button": 1, "finish_button": 0}
+}

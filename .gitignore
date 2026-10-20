@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.ipynb_checkpoints/
+.pytest_cache/
+.venv/
+venv/
+
+# Data and generated model artifacts
+dataset*/
+stop_labels/
+policy_trials/
+runs/
+gui_runs/
+training_artifacts/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.zip
+*.tar.gz
+
+# Runtime output
+*.log
+*.mp4
+*.avi
+core
+core.*

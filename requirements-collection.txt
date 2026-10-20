@@ -1,0 +1,5 @@
+# Install only missing packages in your existing Jetson environment.
+numpy
+Pillow
+# Optional local gamepad: pygame (keyboard control needs no pygame)
+# Hardware: manufacturer-compatible jetracer, jetcam and OpenCV/GStreamer.

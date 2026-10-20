@@ -1,0 +1,6 @@
+# Desktop training; on Jetson use torch/torchvision builds matching JetPack.
+numpy
+Pillow
+torch
+torchvision
+matplotlib

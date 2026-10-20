@@ -1,0 +1,3 @@
+# Python 3.6-compatible Streamlit release for JetPack 4.
+streamlit==0.89.0
+protobuf==3.19.6
