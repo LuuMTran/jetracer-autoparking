@@ -145,9 +145,11 @@ def evaluate(args):
         steering_offset = float(args.steering_offset)
         steering_gain = float(cfg["hardware"]["steering_gain"])
         steering_limit = float(cfg["limits"]["steering"])
-        if abs(steering_offset) + abs(steering_gain) * steering_limit > 1.:
-            raise ValueError("--steering-offset exceeds the calibrated driver range")
         cfg["hardware"]["steering_offset"] = steering_offset
+        maximum_driver_command = abs(steering_offset) + abs(steering_gain) * steering_limit
+        if maximum_driver_command > 1.:
+            print("WARNING: the requested steering offset can saturate the steering "
+                  "driver at extreme policy commands.", flush=True)
     print("Steering offset: checkpoint={:+.3f} runtime={:+.3f}".format(
         checkpoint_steering_offset, float(cfg["hardware"]["steering_offset"])), flush=True)
     backend = _configure_inference_backend(
@@ -269,7 +271,7 @@ def main(argv=None):
                         help="Maximum time per episode; the checkpoint limit is used by default")
     parser.add_argument("--throttle-scale", type=float, default=1.)
     parser.add_argument("--steering-offset", type=float,
-                        help="Override the checkpoint's hardware steering offset")
+                        help="Override the hardware steering offset (-0.6 to 0.6)")
     parser.add_argument("--warmup-seconds", type=float, default=.5)
     parser.add_argument("--max-frame-age-ms", type=float)
     args = parser.parse_args(argv)
@@ -279,6 +281,8 @@ def main(argv=None):
         parser.error("--throttle-scale must be above 0 and no greater than 1")
     if args.steering_offset is not None and not math.isfinite(args.steering_offset):
         parser.error("--steering-offset must be finite")
+    if args.steering_offset is not None and abs(args.steering_offset) > .6:
+        parser.error("--steering-offset must be from -0.6 to 0.6")
     if args.trt_encoder is not None and args.fp16_encoder:
         parser.error("choose either --trt-encoder or --fp16-encoder")
     try:
