@@ -141,15 +141,18 @@ def evaluate(args):
     model, saved = ppo.load_policy(checkpoint, args.device)
     cfg = _runtime_config(saved, args.max_frame_age_ms)
     checkpoint_steering_offset = float(cfg["hardware"]["steering_offset"])
+    checkpoint_steering_limit = float(cfg["limits"]["steering"])
     if args.steering_offset is not None:
         steering_offset = float(args.steering_offset)
         steering_gain = float(cfg["hardware"]["steering_gain"])
         steering_limit = float(cfg["limits"]["steering"])
         cfg["hardware"]["steering_offset"] = steering_offset
-        maximum_driver_command = abs(steering_offset) + abs(steering_gain) * steering_limit
-        if maximum_driver_command > 1.:
-            print("WARNING: the requested steering offset can saturate the steering "
-                  "driver at extreme policy commands.", flush=True)
+        safe_steering_limit = (1. - abs(steering_offset)) / abs(steering_gain)
+        if steering_limit > safe_steering_limit:
+            cfg["limits"]["steering"] = safe_steering_limit
+            print("Steering limit reduced from {:.3f} to {:.3f} to keep the driver "
+                  "within range.".format(
+                      steering_limit, safe_steering_limit), flush=True)
     print("Steering offset: checkpoint={:+.3f} runtime={:+.3f}".format(
         checkpoint_steering_offset, float(cfg["hardware"]["steering_offset"])), flush=True)
     backend = _configure_inference_backend(
@@ -182,6 +185,8 @@ def evaluate(args):
         "throttle_scale": float(args.throttle_scale),
         "checkpoint_steering_offset": checkpoint_steering_offset,
         "runtime_steering_offset": float(cfg["hardware"]["steering_offset"]),
+        "checkpoint_steering_limit": checkpoint_steering_limit,
+        "runtime_steering_limit": float(cfg["limits"]["steering"]),
         "maximum_steps": int(maximum_steps),
         "control_hz": control_hz,
         "rating_scale": {rating: value for rating, value in RATINGS.items()},
