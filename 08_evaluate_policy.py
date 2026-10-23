@@ -12,6 +12,22 @@ import time
 import traceback
 
 
+RATINGS = {
+    "1": {"score": -1.0, "outcome": "collision",
+          "label": "Collision or unsafe termination"},
+    "2": {"score": -0.6, "outcome": "failure",
+          "label": "Wrong trajectory, wrong slot, overrun, or major failure"},
+    "3": {"score": -0.2, "outcome": "failure",
+          "label": "Reached the parking area but did not park"},
+    "4": {"score": 0.2, "outcome": "success",
+          "label": "Inside the correct slot but noticeably misaligned"},
+    "5": {"score": 0.6, "outcome": "success",
+          "label": "Successfully parked with a small offset or angle error"},
+    "6": {"score": 1.0, "outcome": "success",
+          "label": "Fully parked, centred, and aligned"},
+}
+
+
 def atomic_json(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w") as destination:
@@ -22,8 +38,9 @@ def atomic_json(path, value):
 
 def atomic_csv(path, rows):
     fields = [
-        "episode", "score", "outcome", "end_reason", "steps", "elapsed_s",
-        "policy", "condition", "checkpoint", "update", "recorded_at",
+        "episode", "rating", "score", "rubric_label", "outcome", "end_reason",
+        "steps", "elapsed_s", "policy", "condition", "checkpoint", "update",
+        "recorded_at",
     ]
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w") as destination:
@@ -38,6 +55,8 @@ def summarize(rows):
     total = len(rows)
     return {
         "completed_episodes": total,
+        "mean_rating": (
+            sum(float(row["rating"]) for row in rows) / total if total else None),
         "mean_score": (sum(scores) / total if total else None),
         "score_standard_deviation": (
             statistics.pstdev(scores) if len(scores) > 1 else (0.0 if scores else None)),
@@ -74,23 +93,20 @@ class EvaluationKeys(object):
     def poll_episode(self):
         return self.keys.poll_episode()
 
-    def wait_score(self):
-        return self.keys.wait_score()
-
-    def wait_outcome(self):
-        print("OUTCOME: Y=successful parking, N=unsuccessful, C=collision, "
-              "D=discard, Escape=exit.", flush=True)
+    def wait_rating(self):
+        print("RATING:", flush=True)
+        for rating in sorted(RATINGS):
+            item = RATINGS[rating]
+            print("  {} ({:+.1f}): {}".format(
+                rating, item["score"], item["label"]), flush=True)
+        print("Press 1-6; D=discard; Escape=exit.", flush=True)
         while True:
             key = self.keys.read(.1)
-            if key == "y":
-                print("success", flush=True)
-                return "success"
-            if key == "n":
-                print("failure", flush=True)
-                return "failure"
-            if key == "c":
-                print("collision", flush=True)
-                return "collision"
+            if key in RATINGS:
+                result = dict(RATINGS[key])
+                result["rating"] = int(key)
+                print("{}: {}".format(key, result["label"]), flush=True)
+                return result
             if key == "d":
                 print("discard", flush=True)
                 return "discard"
@@ -113,7 +129,6 @@ def unique_run_directory(root, policy, update):
 
 
 def evaluate(args):
-    import torch
     from parking_lib.camera import Camera
     from parking_lib.core import Car
     from parking_lib import ppo
@@ -142,7 +157,7 @@ def evaluate(args):
     csv_path = run_directory / "episodes.csv"
     metadata = {
         "schema_version": 1,
-        "evaluation_mode": "deterministic_human_scored",
+        "evaluation_mode": "deterministic_six_level_human_rated",
         "policy": args.policy,
         "condition": args.condition,
         "checkpoint": str(checkpoint),
@@ -155,6 +170,7 @@ def evaluate(args):
         "throttle_scale": float(args.throttle_scale),
         "maximum_steps": int(maximum_steps),
         "control_hz": control_hz,
+        "rating_scale": {rating: value for rating, value in RATINGS.items()},
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     rows = []
@@ -186,23 +202,19 @@ def evaluate(args):
             if exit_requested:
                 break
 
-            score = keys.wait_score()
-            if score == "exit":
+            rating = keys.wait_rating()
+            if rating == "exit":
                 break
-            if score == "discard":
-                print("Episode discarded; it will not count toward the target.", flush=True)
-                continue
-            outcome = keys.wait_outcome()
-            if outcome == "exit":
-                break
-            if outcome == "discard":
+            if rating == "discard":
                 print("Episode discarded; it will not count toward the target.", flush=True)
                 continue
 
             row = {
                 "episode": len(rows) + 1,
-                "score": float(score["reward"]),
-                "outcome": outcome,
+                "rating": int(rating["rating"]),
+                "score": float(rating["score"]),
+                "rubric_label": rating["label"],
+                "outcome": rating["outcome"],
                 "end_reason": reason,
                 "steps": int(steps),
                 "elapsed_s": round(float(elapsed), 3),
@@ -215,10 +227,11 @@ def evaluate(args):
             rows.append(row)
             save()
             current = summarize(rows)
-            print("RECORDED: episode {}/{} score={:+.3f} outcome={} "
-                  "running_mean={:+.3f} success_rate={:.1%}".format(
-                      len(rows), args.episodes, row["score"], outcome,
-                      current["mean_score"], current["success_rate"]), flush=True)
+            print("RECORDED: episode {}/{} rating={} score={:+.1f} outcome={} "
+                  "mean_rating={:.2f} success_rate={:.1%}".format(
+                      len(rows), args.episodes, row["rating"], row["score"],
+                      row["outcome"], current["mean_rating"],
+                      current["success_rate"]), flush=True)
 
     metadata["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     save()
