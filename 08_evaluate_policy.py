@@ -140,6 +140,16 @@ def evaluate(args):
     checkpoint = inference_checkpoint(args.checkpoint)
     model, saved = ppo.load_policy(checkpoint, args.device)
     cfg = _runtime_config(saved, args.max_frame_age_ms)
+    checkpoint_steering_offset = float(cfg["hardware"]["steering_offset"])
+    if args.steering_offset is not None:
+        steering_offset = float(args.steering_offset)
+        steering_gain = float(cfg["hardware"]["steering_gain"])
+        steering_limit = float(cfg["limits"]["steering"])
+        if abs(steering_offset) + abs(steering_gain) * steering_limit > 1.:
+            raise ValueError("--steering-offset exceeds the calibrated driver range")
+        cfg["hardware"]["steering_offset"] = steering_offset
+    print("Steering offset: checkpoint={:+.3f} runtime={:+.3f}".format(
+        checkpoint_steering_offset, float(cfg["hardware"]["steering_offset"])), flush=True)
     backend = _configure_inference_backend(
         model, saved, args.device, args.trt_encoder, args.fp16_encoder)
     stop_head, stop_decision = load_stop_head(args.stop_head, saved, args.device)
@@ -168,6 +178,8 @@ def evaluate(args):
         "backend": backend,
         "stop_head": str(args.stop_head) if args.stop_head is not None else None,
         "throttle_scale": float(args.throttle_scale),
+        "checkpoint_steering_offset": checkpoint_steering_offset,
+        "runtime_steering_offset": float(cfg["hardware"]["steering_offset"]),
         "maximum_steps": int(maximum_steps),
         "control_hz": control_hz,
         "rating_scale": {rating: value for rating, value in RATINGS.items()},
@@ -256,6 +268,8 @@ def main(argv=None):
     parser.add_argument("--seconds", type=float,
                         help="Maximum time per episode; the checkpoint limit is used by default")
     parser.add_argument("--throttle-scale", type=float, default=1.)
+    parser.add_argument("--steering-offset", type=float,
+                        help="Override the checkpoint's hardware steering offset")
     parser.add_argument("--warmup-seconds", type=float, default=.5)
     parser.add_argument("--max-frame-age-ms", type=float)
     args = parser.parse_args(argv)
@@ -263,6 +277,8 @@ def main(argv=None):
         parser.error("--episodes must be positive")
     if not math.isfinite(args.throttle_scale) or not 0. < args.throttle_scale <= 1.:
         parser.error("--throttle-scale must be above 0 and no greater than 1")
+    if args.steering_offset is not None and not math.isfinite(args.steering_offset):
+        parser.error("--steering-offset must be finite")
     if args.trt_encoder is not None and args.fp16_encoder:
         parser.error("choose either --trt-encoder or --fp16-encoder")
     try:
