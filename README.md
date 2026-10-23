@@ -45,6 +45,8 @@ stationary frames:
 | `train_slot_classifier.py` | Train the three-frame left-slot classifier |
 | `07_streamlit_overall.py` | Browser control room |
 | `07_streamlit_worker.py` | Hardware worker used by Streamlit |
+| `08_evaluate_policy.py` | Deterministic, human-rated checkpoint evaluation |
+| `09_follow_policy_offset.py` | Follow PPO with runtime steering offset and throttle scaling |
 | `parking_lib/` | Shared camera, hardware, learning, PPO, and routing implementation |
 
 ## Installation
