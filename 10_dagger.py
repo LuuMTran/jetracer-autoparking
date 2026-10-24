@@ -26,12 +26,16 @@ def collect(args):
     from parking_lib.data import AsyncRecorder, validate_episode
     from parking_lib.ppo_loop import (
         _configure_inference_backend, _image_input, _previous_input,
-        _require_finite_recurrent, _runtime_config, inference_checkpoint,
+        _require_finite_recurrent, _runtime_action, _runtime_config,
+        _validate_runtime_action_controls, inference_checkpoint,
     )
 
     checkpoint = inference_checkpoint(args.checkpoint)
     model, saved = ppo.load_policy(checkpoint, args.device)
     cfg = _runtime_config(saved, args.max_frame_age_ms)
+    _validate_runtime_action_controls(
+        args.throttle_scale, args.steering_scale, args.initial_forward_thrust,
+        args.initial_forward_steps, args.initial_forward_cap)
     backend = _configure_inference_backend(
         model, saved, args.device, args.trt_encoder, args.fp16_encoder)
     model.eval()
@@ -87,6 +91,13 @@ def collect(args):
                 "policy_update": int(saved["update"]),
                 "label_columns": ["requested_steering_norm", "requested_throttle_norm"],
                 "executed_action": "beta * expert + (1-beta) * deterministic_policy",
+                "policy_action_transform": {
+                    "steering_scale": float(args.steering_scale),
+                    "throttle_scale": float(args.throttle_scale),
+                    "initial_forward_thrust": float(args.initial_forward_thrust),
+                    "initial_forward_steps": int(args.initial_forward_steps),
+                    "initial_forward_cap": float(args.initial_forward_cap),
+                },
             },
         })
         print("Recording:", recorder.path, flush=True)
@@ -118,7 +129,12 @@ def collect(args):
                         policy, _, _, _ = model.act_recurrent(
                             recurrent, deterministic=True)
                     inference_s = time.monotonic() - inference_started
-                    policy_action = tuple(float(v) for v in policy[0, 0].cpu().tolist())
+                    raw_policy_action = tuple(
+                        float(v) for v in policy[0, 0].cpu().tolist())
+                    policy_action = _runtime_action(
+                        raw_policy_action, args.steering_scale, args.throttle_scale,
+                        step, args.initial_forward_thrust,
+                        args.initial_forward_steps, args.initial_forward_cap)
 
                     if not expert.active:
                         if started is None:
@@ -340,6 +356,12 @@ def main(argv=None):
     collect_parser.add_argument("--trt-encoder", type=Path)
     collect_parser.add_argument("--fp16-encoder", action="store_true")
     collect_parser.add_argument("--max-frame-age-ms", type=float, default=500.)
+    collect_parser.add_argument("--steering-scale", type=float, default=1.)
+    collect_parser.add_argument("--throttle-scale", type=float, default=1.)
+    collect_parser.add_argument("--initial-forward-thrust", type=float, default=0.,
+                                help="Positive magnitude subtracted from initial policy throttle")
+    collect_parser.add_argument("--initial-forward-steps", type=int, default=0)
+    collect_parser.add_argument("--initial-forward-cap", type=float, default=1.)
 
     train_parser = sub.add_parser("train", help="Fine-tune the PPO actor on aggregated expert labels")
     train_parser.add_argument("--checkpoint", type=Path, required=True,
@@ -373,6 +395,14 @@ def main(argv=None):
             parser.error("sequence length must be positive and warmup frames cannot be negative")
         if args.trt_encoder is not None and args.fp16_encoder:
             parser.error("choose either --trt-encoder or --fp16-encoder")
+        try:
+            from parking_lib.ppo_loop import _validate_runtime_action_controls
+            _validate_runtime_action_controls(
+                args.throttle_scale, args.steering_scale,
+                args.initial_forward_thrust, args.initial_forward_steps,
+                args.initial_forward_cap)
+        except ValueError as error:
+            parser.error(str(error))
         collect(args)
     else:
         if min(args.epochs, args.batch_size, args.sequence_length, args.stride,

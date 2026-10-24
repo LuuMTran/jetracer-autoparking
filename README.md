@@ -156,7 +156,8 @@ saved as the training label, while `beta` controls the action sent to the car.
 python3 10_dagger.py collect \
   --checkpoint runs/direct_ppo/ppo_0092.pt \
   --dataset dataset_direct \
-  --controller gamepad --beta 0.5 --device cuda --fp16-encoder
+  --controller gamepad --beta 0.5 --device cuda --fp16-encoder \
+  --steering-scale 1.0 --throttle-scale 1.0
 
 python3 10_dagger.py train \
   --checkpoint runs/direct_ppo/ppo_0092.pt \
