@@ -116,7 +116,8 @@ def eligible_episodes(root, allow_synthetic=False, include_completed_unreviewed=
         user_selected_completed = (include_completed_unreviewed and
                                    meta.get("status") == "completed" and
                                    meta.get("outcome") not in ("collision", "discard"))
-        if (not explicitly_accepted and not user_selected_completed) or meta.get("source") != "human":
+        if ((not explicitly_accepted and not user_selected_completed) or
+                meta.get("source") not in ("human", "dagger")):
             continue
         if meta.get("synthetic") and not allow_synthetic:
             continue
@@ -171,6 +172,8 @@ class Sequences(Dataset):
 
     def __getitem__(self, index):
         path, rows = self.samples[index]
+        metadata = json.loads((path / "metadata.json").read_text())
+        dagger_labels = metadata.get("source") == "dagger"
         images = []
         parameters = self.augmentation.sample() if self.augmentation is not None else None
         for row in rows:
@@ -179,7 +182,11 @@ class Sequences(Dataset):
                     im = self.augmentation.apply(im, parameters)
                 images.append(image_tensor(im))
         previous = [[float(r["prev_steering_norm"]), float(r["prev_throttle_norm"])] for r in rows]
-        target = [[float(r["steering_norm"]), float(r["throttle_norm"])] for r in rows]
+        # A DAgger episode executes a policy/expert mixture, but the requested
+        # action columns contain the expert label for the visited state.
+        target_keys = (("requested_steering_norm", "requested_throttle_norm")
+                       if dagger_labels else ("steering_norm", "throttle_norm"))
+        target = [[float(r[target_keys[0]]), float(r[target_keys[1]])] for r in rows]
         return torch.stack(images), torch.tensor(previous, dtype=torch.float32), torch.tensor(target, dtype=torch.float32)
 
 

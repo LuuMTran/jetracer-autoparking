@@ -47,6 +47,7 @@ stationary frames:
 | `07_streamlit_worker.py` | Hardware worker used by Streamlit |
 | `08_evaluate_policy.py` | Deterministic, human-rated checkpoint evaluation |
 | `09_follow_policy_offset.py` | Follow PPO with runtime steering offset and throttle scaling |
+| `10_dagger.py` | Collect expert labels on policy states and fine-tune the actor with DAgger |
 | `parking_lib/` | Shared camera, hardware, learning, PPO, and routing implementation |
 
 ## Installation
@@ -144,6 +145,30 @@ python3 06_stop_tuning.py sequence \
 
 The terminal prints the left-slot probability and selected route before either
 driving policy starts.
+
+## DAgger correction rounds
+
+Collect an expert-labelled episode from states visited by the current PPO
+policy. Keep the controller active throughout the episode: the expert action is
+saved as the training label, while `beta` controls the action sent to the car.
+
+```bash
+python3 10_dagger.py collect \
+  --checkpoint runs/direct_ppo/ppo_0092.pt \
+  --dataset dataset_direct \
+  --controller gamepad --beta 0.5 --device cuda --fp16-encoder
+
+python3 10_dagger.py train \
+  --checkpoint runs/direct_ppo/ppo_0092.pt \
+  --dataset dataset_direct \
+  --output runs/direct_dagger_round1.pt \
+  --augment --epochs 10 --device cuda
+```
+
+Repeat collection and training while reducing `beta`, for example 0.5, 0.25,
+then 0.0. By default only the actor changes, so the existing recurrent stop head
+remains compatible. `--train-gru` adapts the temporal representation and
+requires retraining the stop head.
 
 ## GUI
 
