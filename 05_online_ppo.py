@@ -2,6 +2,7 @@
 """Initialize, train, inspect, or deterministically run a recurrent PPO policy."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -55,6 +56,14 @@ def main(argv=None):
     physical.add_argument("--warmup-seconds", type=float, default=.5)
     physical.add_argument("--max-frame-age-ms", type=float,
                           help="Runtime frame-age limit; for example 400 after benchmarking")
+    physical.add_argument("--throttle-scale", type=float, default=1.,
+                          help="Multiply policy throttle during collection (above 0 to 1)")
+    physical.add_argument("--steering-offset", type=float,
+                          help="Override hardware steering offset (-0.6 to 0.6)")
+    physical.add_argument("--steering-scale", type=float, default=1.,
+                          help="Multiply policy steering before limiting (default 1)")
+    physical.add_argument("--steering-limit", type=float,
+                          help="Override physical steering limit (above 0 to 1)")
     follow = sub.add_parser("follow", help="Run the latest PPO policy without training or recording")
     follow.add_argument("--checkpoint", type=Path, required=True,
                         help="Exact PPO checkpoint, or a directory whose newest version is loaded")
@@ -74,6 +83,19 @@ def main(argv=None):
     if args.task is None:
         parser.print_help()
         return
+    if args.task == "physical-loop":
+        if not math.isfinite(args.throttle_scale) or not 0. < args.throttle_scale <= 1.:
+            parser.error("--throttle-scale must be above 0 and no greater than 1")
+        if args.steering_offset is not None:
+            if not math.isfinite(args.steering_offset):
+                parser.error("--steering-offset must be finite")
+            if abs(args.steering_offset) > .6:
+                parser.error("--steering-offset must be from -0.6 to 0.6")
+        if not math.isfinite(args.steering_scale) or args.steering_scale <= 0.:
+            parser.error("--steering-scale must be a positive finite number")
+        if args.steering_limit is not None:
+            if not math.isfinite(args.steering_limit) or not 0. < args.steering_limit <= 1.:
+                parser.error("--steering-limit must be above 0 and no greater than 1")
     from parking_lib import ppo
     if args.task == "init":
         online = load_json(args.config)
@@ -108,7 +130,9 @@ def main(argv=None):
                 report = run_physical_loop(
                     args.checkpoint, args.run_dir, args.device, args.trt_encoder, args.stop_head,
                     args.max_updates, args.max_episodes, args.warmup_seconds,
-                    args.max_frame_age_ms, args.fp16_encoder, args.episodes_per_update)
+                    args.max_frame_age_ms, args.fp16_encoder, args.episodes_per_update,
+                    args.steering_offset, args.steering_scale, args.steering_limit,
+                    args.throttle_scale)
             else:
                 report = run_follow_loop(
                     args.checkpoint, args.device, args.trt_encoder, args.stop_head,

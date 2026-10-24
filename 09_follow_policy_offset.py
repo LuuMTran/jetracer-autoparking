@@ -15,32 +15,16 @@ def follow(args):
     from parking_lib import ppo
     from parking_lib.ppo_loop import (
         TerminalKeys, _configure_inference_backend, _runtime_config,
-        follow_episode, inference_checkpoint, load_stop_head,
+        apply_runtime_steering_config, follow_episode, inference_checkpoint,
+        load_stop_head,
     )
 
     checkpoint = inference_checkpoint(args.checkpoint)
     model, saved = ppo.load_policy(checkpoint, args.device)
     cfg = _runtime_config(saved, args.max_frame_age_ms)
 
-    checkpoint_offset = float(cfg["hardware"]["steering_offset"])
-    checkpoint_limit = float(cfg["limits"]["steering"])
-    if args.steering_limit is not None:
-        cfg["limits"]["steering"] = float(args.steering_limit)
-    if args.steering_offset is not None:
-        cfg["hardware"]["steering_offset"] = float(args.steering_offset)
-    offset = float(cfg["hardware"]["steering_offset"])
-    gain = float(cfg["hardware"]["steering_gain"])
-    requested_limit = float(cfg["limits"]["steering"])
-    safe_limit = (1. - abs(offset)) / abs(gain)
-    if requested_limit > safe_limit:
-        if args.steering_limit is not None:
-            raise ValueError("--steering-limit {:.3f} is unsafe with offset {:+.3f} and "
-                             "gain {:+.3f}; maximum safe limit is {:.3f}".format(
-                                 requested_limit, offset, gain, safe_limit))
-        else:
-            cfg["limits"]["steering"] = safe_limit
-            print("Steering limit reduced from {:.3f} to {:.3f} to keep the driver "
-                  "within range.".format(requested_limit, safe_limit), flush=True)
+    checkpoint_offset, checkpoint_limit = apply_runtime_steering_config(
+        cfg, args.steering_offset, args.steering_limit)
 
     print("FOLLOW CHECKPOINT: {}".format(checkpoint), flush=True)
     print("Steering offset: checkpoint={:+.3f} runtime={:+.3f}".format(

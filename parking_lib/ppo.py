@@ -252,18 +252,51 @@ def validate_rollout(rollout, checkpoint_saved, checkpoint_sha256=None):
     expected_actions = torch.tanh(rollout["raw_actions"].float()) * scale
     if not torch.allclose(rollout["actions"].float(), expected_actions, atol=1e-5, rtol=1e-5):
         raise ValueError("Saved PPO actions do not match their pre-tanh samples")
-    physical_error = (rollout["applied_actions"].float() - rollout["actions"].float()).abs().max()
+    transform = rollout.get("runtime_action_transform", {})
+    steering_scale = float(transform.get("steering_scale", 1.))
+    throttle_scale = float(transform.get("throttle_scale", 1.))
+    if not math.isfinite(steering_scale) or steering_scale <= 0.:
+        raise ValueError("Invalid rollout steering scale")
+    if not math.isfinite(throttle_scale) or not 0. < throttle_scale <= 1.:
+        raise ValueError("Invalid rollout throttle scale")
+    cfg = checkpoint_saved["config"]
+    steering_offset = float(transform.get(
+        "steering_offset", cfg["hardware"]["steering_offset"]))
+    steering_limit = float(transform.get(
+        "steering_limit", cfg["limits"]["steering"]))
+    steering_gain = float(cfg["hardware"]["steering_gain"])
+    if (not math.isfinite(steering_offset) or not math.isfinite(steering_limit) or
+            not 0. < steering_limit <= 1. or
+            abs(steering_offset) + abs(steering_gain) * steering_limit > 1.000001):
+        raise ValueError("Invalid rollout steering calibration")
+    expected_applied = rollout["actions"].float().clone()
+    expected_applied[:, 0] = (expected_applied[:, 0] * steering_scale).clamp(-1., 1.)
+    expected_applied[:, 1] = expected_applied[:, 1] * throttle_scale
+    physical_error = (rollout["applied_actions"].float() - expected_applied).abs().max()
     if float(physical_error) > .021:
-        raise ValueError("Applied motor action differs from the sampled PPO action")
+        raise ValueError("Applied motor action differs from the recorded runtime transform")
     return length
 
 
 def load_rollouts(paths, checkpoint, checkpoint_saved):
     checkpoint_hash = file_sha256(checkpoint)
     result = []
+    runtime_transform = None
     for path in paths:
         rollout = load_checkpoint(path, "cpu")
         validate_rollout(rollout, checkpoint_saved, checkpoint_hash)
+        transform = rollout.get("runtime_action_transform", {})
+        cfg = checkpoint_saved["config"]
+        signature = (
+            float(transform.get("steering_scale", 1.)),
+            float(transform.get("throttle_scale", 1.)),
+            float(transform.get("steering_offset", cfg["hardware"]["steering_offset"])),
+            float(transform.get("steering_limit", cfg["limits"]["steering"])),
+        )
+        if runtime_transform is None:
+            runtime_transform = signature
+        elif signature != runtime_transform:
+            raise ValueError("PPO rollouts for one update use different runtime action settings")
         rollout["source_path"] = str(path)
         result.append(rollout)
     return result

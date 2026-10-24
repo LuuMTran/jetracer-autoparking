@@ -275,6 +275,30 @@ def _runtime_config(saved, max_frame_age_ms=None):
     return cfg
 
 
+def apply_runtime_steering_config(cfg, steering_offset=None, steering_limit=None):
+    """Apply safe runtime steering calibration overrides to a config copy."""
+    checkpoint_offset = float(cfg["hardware"]["steering_offset"])
+    checkpoint_limit = float(cfg["limits"]["steering"])
+    if steering_limit is not None:
+        cfg["limits"]["steering"] = float(steering_limit)
+    if steering_offset is not None:
+        cfg["hardware"]["steering_offset"] = float(steering_offset)
+
+    offset = float(cfg["hardware"]["steering_offset"])
+    gain = float(cfg["hardware"]["steering_gain"])
+    requested_limit = float(cfg["limits"]["steering"])
+    safe_limit = (1. - abs(offset)) / abs(gain)
+    if requested_limit > safe_limit:
+        if steering_limit is not None:
+            raise ValueError("--steering-limit {:.3f} is unsafe with offset {:+.3f} and "
+                             "gain {:+.3f}; maximum safe limit is {:.3f}".format(
+                                 requested_limit, offset, gain, safe_limit))
+        cfg["limits"]["steering"] = safe_limit
+        print("Steering limit reduced from {:.3f} to {:.3f} to keep the driver "
+              "within range.".format(requested_limit, safe_limit), flush=True)
+    return checkpoint_offset, checkpoint_limit
+
+
 def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
                    stop_head=None, stop_decision=None, warmup_s=.5,
                    maximum_steps=400, throttle_scale=1., telemetry_callback=None,
@@ -417,8 +441,15 @@ def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
 
 def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
                     backend="pytorch", stop_head=None, stop_decision=None,
-                    warmup_s=.5, maximum_steps=400):
+                    warmup_s=.5, maximum_steps=400, throttle_scale=1.,
+                    steering_scale=1.):
     """Collect one autonomous on-policy episode and ask for a terminal score."""
+    throttle_scale = float(throttle_scale)
+    if not math.isfinite(throttle_scale) or not 0. < throttle_scale <= 1.:
+        raise ValueError("PPO throttle scale must be above 0 and no greater than 1")
+    steering_scale = float(steering_scale)
+    if not math.isfinite(steering_scale) or steering_scale <= 0.:
+        raise ValueError("PPO steering scale must be a positive finite number")
     control_hz = float(cfg["control"]["hz"])
     period = 1. / control_hz
     hidden = None
@@ -467,6 +498,12 @@ def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
     reason = "duration_limit"
     bootstrap_value = 0.
     print("RUNNING: policy is autonomous; F ends for scoring; Escape emergency-stops and exits.", flush=True)
+    if throttle_scale != 1.:
+        print("RUNNING: throttle output scaled to {:.0f}%.".format(
+            throttle_scale * 100.), flush=True)
+    if steering_scale != 1.:
+        print("RUNNING: steering output scaled to {:.0f}%.".format(
+            steering_scale * 100.), flush=True)
     while len(data["rewards"]) < int(maximum_steps):
         frame = camera.read(after=last_id, timeout=max(2., cfg["control"]["max_frame_age_s"]))
         last_id = frame["frame_id"]
@@ -502,10 +539,14 @@ def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
             raise RuntimeError("Frame too old after PPO inference: {:.0f}ms > {:.0f}ms".format(
                 frame_age_s * 1000., cfg["control"]["max_frame_age_s"] * 1000.))
         sampled = tuple(float(value) for value in action[0, 0].cpu().tolist())
-        command = car.apply(sampled)
+        requested = (
+            max(-1., min(1., sampled[0] * steering_scale)),
+            sampled[1] * throttle_scale,
+        )
+        command = car.apply(requested)
         applied = tuple(float(value) for value in command["normalized"])
-        if max(abs(sampled[index] - applied[index]) for index in range(2)) > .02:
-            raise RuntimeError("Applied motor command differs from sampled PPO action")
+        if max(abs(requested[index] - applied[index]) for index in range(2)) > .02:
+            raise RuntimeError("Applied motor command differs from scaled PPO action")
         previous = command["action"]
         data["recurrent"].append(recurrent[0, 0].float().cpu())
         data["actions"].append(torch.tensor(sampled, dtype=torch.float32))
@@ -570,6 +611,12 @@ def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
         "created_unix_s": time.time(), "reward_source": "human_terminal",
         "outcome": outcome, "terminal_score": terminal_score, "end_reason": reason,
         "control_hz": control_hz, "backend": backend,
+        "runtime_action_transform": {
+            "steering_scale": steering_scale,
+            "throttle_scale": throttle_scale,
+            "steering_offset": float(cfg["hardware"]["steering_offset"]),
+            "steering_limit": float(cfg["limits"]["steering"]),
+        },
     }
     rollout.update({
         "recurrent": torch.stack(data["recurrent"]),
@@ -607,7 +654,9 @@ def update_when_ready(model, saved, checkpoint, run_dir, device, minimum_episode
 
 def run_physical_loop(checkpoint, run_dir, device="cuda", trt_encoder=None, stop_head_path=None,
                       maximum_updates=0, maximum_episodes=0, warmup_s=.5,
-                      max_frame_age_ms=None, fp16_encoder=False, episodes_per_update=5):
+                      max_frame_age_ms=None, fp16_encoder=False, episodes_per_update=5,
+                      steering_offset=None, steering_scale=1., steering_limit=None,
+                      throttle_scale=1.):
     """Keep camera/driver open while collecting, scoring, and updating PPO."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -623,6 +672,14 @@ def run_physical_loop(checkpoint, run_dir, device="cuda", trt_encoder=None, stop
             online["algorithm"].get("train_projection", False)):
         raise ValueError("The persistent feature-rollout loop requires frozen projection and GRU")
     cfg = _runtime_config(saved, max_frame_age_ms)
+    checkpoint_offset, checkpoint_limit = apply_runtime_steering_config(
+        cfg, steering_offset, steering_limit)
+    print("Steering offset: checkpoint={:+.3f} runtime={:+.3f}".format(
+        checkpoint_offset, float(cfg["hardware"]["steering_offset"])), flush=True)
+    print("Steering limit: checkpoint={:.3f} runtime={:.3f}".format(
+        checkpoint_limit, float(cfg["limits"]["steering"])), flush=True)
+    print("Steering scale: {:.3f}".format(float(steering_scale)), flush=True)
+    print("Throttle scale: {:.3f}".format(float(throttle_scale)), flush=True)
     backend = _configure_inference_backend(
         model, saved, device, trt_encoder, fp16_encoder)
     print("Inference backend: {}".format(backend), flush=True)
@@ -651,7 +708,8 @@ def run_physical_loop(checkpoint, run_dir, device="cuda", trt_encoder=None, stop
                 break
             rollout, exit_requested = collect_episode(
                 model, saved, checkpoint, cfg, camera, car, keys, device, backend,
-                stop_head, stop_decision, warmup_s, maximum_steps)
+                stop_head, stop_decision, warmup_s, maximum_steps,
+                throttle_scale, steering_scale)
             if exit_requested:
                 break
             if rollout is not None:
