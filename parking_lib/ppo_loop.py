@@ -237,11 +237,19 @@ def quarantine_mismatched_rollouts(paths, checkpoint, checkpoint_saved, run_dir)
     quarantine = Path(run_dir) / "rollouts" / "quarantine" / "update_{:04d}".format(
         expected_update)
     for path in paths:
-        artifact = load_checkpoint(path, "cpu")
-        matches = (
-            int(artifact.get("policy_update", -1)) == expected_update and
-            artifact.get("policy_checkpoint_sha256") == checkpoint_hash
-        )
+        try:
+            artifact = load_checkpoint(path, "cpu")
+            matches = (
+                int(artifact.get("policy_update", -1)) == expected_update and
+                artifact.get("policy_checkpoint_sha256") == checkpoint_hash
+            )
+        except Exception as error:
+            # A power loss, full disk, or interrupted older write can leave an
+            # empty/truncated .pt file. It cannot contribute to an update, so
+            # quarantine it just like a rollout from the wrong checkpoint.
+            matches = False
+            print("ROLLOUT QUARANTINE: unreadable {} ({})".format(
+                path, repr(error)), flush=True)
         if matches:
             valid.append(path)
             continue
