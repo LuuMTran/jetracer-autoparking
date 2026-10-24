@@ -64,6 +64,12 @@ def main(argv=None):
                           help="Multiply policy steering before limiting (default 1)")
     physical.add_argument("--steering-limit", type=float,
                           help="Override physical steering limit (above 0 to 1)")
+    physical.add_argument("--initial-forward-thrust", type=float, default=0.,
+                          help="Positive magnitude subtracted from initial throttle")
+    physical.add_argument("--initial-forward-steps", type=int, default=0,
+                          help="Number of initial applied actions receiving forward thrust")
+    physical.add_argument("--initial-forward-cap", type=float, default=1.,
+                          help="Maximum negative throttle magnitude during initial thrust")
     follow = sub.add_parser("follow", help="Run the latest PPO policy without training or recording")
     follow.add_argument("--checkpoint", type=Path, required=True,
                         help="Exact PPO checkpoint, or a directory whose newest version is loaded")
@@ -96,6 +102,16 @@ def main(argv=None):
         if args.steering_limit is not None:
             if not math.isfinite(args.steering_limit) or not 0. < args.steering_limit <= 1.:
                 parser.error("--steering-limit must be above 0 and no greater than 1")
+        if (not math.isfinite(args.initial_forward_thrust) or
+                not 0. <= args.initial_forward_thrust <= 1.):
+            parser.error("--initial-forward-thrust must be from 0 to 1")
+        if args.initial_forward_steps < 0:
+            parser.error("--initial-forward-steps must be zero or positive")
+        if (not math.isfinite(args.initial_forward_cap) or
+                not 0. < args.initial_forward_cap <= 1.):
+            parser.error("--initial-forward-cap must be above 0 and no greater than 1")
+        if args.initial_forward_thrust > 0. and args.initial_forward_steps < 1:
+            parser.error("--initial-forward-steps must be positive when startup thrust is used")
     from parking_lib import ppo
     if args.task == "init":
         online = load_json(args.config)
@@ -132,7 +148,8 @@ def main(argv=None):
                     args.max_updates, args.max_episodes, args.warmup_seconds,
                     args.max_frame_age_ms, args.fp16_encoder, args.episodes_per_update,
                     args.steering_offset, args.steering_scale, args.steering_limit,
-                    args.throttle_scale)
+                    args.throttle_scale, args.initial_forward_thrust,
+                    args.initial_forward_steps, args.initial_forward_cap)
             else:
                 report = run_follow_loop(
                     args.checkpoint, args.device, args.trt_encoder, args.stop_head,

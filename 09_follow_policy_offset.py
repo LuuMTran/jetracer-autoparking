@@ -33,6 +33,10 @@ def follow(args):
         checkpoint_limit, float(cfg["limits"]["steering"])), flush=True)
     print("Steering scale: {:.3f}".format(args.steering_scale), flush=True)
     print("Throttle scale: {:.3f}".format(args.throttle_scale), flush=True)
+    if args.initial_forward_thrust > 0.:
+        print("Initial forward throttle: bias=-{:.3f} steps={} cap={:.3f}".format(
+            args.initial_forward_thrust, args.initial_forward_steps,
+            args.initial_forward_cap), flush=True)
 
     backend = _configure_inference_backend(
         model, saved, args.device, args.trt_encoder, args.fp16_encoder)
@@ -57,7 +61,10 @@ def follow(args):
             reason, exit_requested, steps = follow_episode(
                 model, cfg, camera, car, keys, args.device, backend, stop_head,
                 stop_decision, args.warmup_seconds, maximum_steps,
-                args.throttle_scale, steering_scale=args.steering_scale)
+                args.throttle_scale, steering_scale=args.steering_scale,
+                initial_forward_thrust=args.initial_forward_thrust,
+                initial_forward_steps=args.initial_forward_steps,
+                initial_forward_cap=args.initial_forward_cap)
             completed_runs += 1
             print("FOLLOW STOPPED: {} after {} applied actions".format(
                 reason, steps), flush=True)
@@ -72,6 +79,9 @@ def follow(args):
         "steering_limit": float(cfg["limits"]["steering"]),
         "steering_scale": float(args.steering_scale),
         "throttle_scale": float(args.throttle_scale),
+        "initial_forward_thrust": float(args.initial_forward_thrust),
+        "initial_forward_steps": int(args.initial_forward_steps),
+        "initial_forward_cap": float(args.initial_forward_cap),
         "mode": "deterministic_follow_with_runtime_calibration",
     }
 
@@ -94,6 +104,12 @@ def main(argv=None):
                         help="Multiply policy steering before limiting (default 1)")
     parser.add_argument("--steering-limit", type=float,
                         help="Override physical steering limit (above 0 to 1)")
+    parser.add_argument("--initial-forward-thrust", type=float, default=0.,
+                        help="Positive magnitude subtracted from initial throttle")
+    parser.add_argument("--initial-forward-steps", type=int, default=0,
+                        help="Number of initial applied actions receiving forward thrust")
+    parser.add_argument("--initial-forward-cap", type=float, default=1.,
+                        help="Maximum negative throttle magnitude during initial thrust")
     parser.add_argument("--warmup-seconds", type=float, default=.5)
     parser.add_argument("--max-frame-age-ms", type=float)
     args = parser.parse_args(argv)
@@ -110,6 +126,16 @@ def main(argv=None):
     if args.steering_limit is not None:
         if not math.isfinite(args.steering_limit) or not 0. < args.steering_limit <= 1.:
             parser.error("--steering-limit must be above 0 and no greater than 1")
+    if (not math.isfinite(args.initial_forward_thrust) or
+            not 0. <= args.initial_forward_thrust <= 1.):
+        parser.error("--initial-forward-thrust must be from 0 to 1")
+    if args.initial_forward_steps < 0:
+        parser.error("--initial-forward-steps must be zero or positive")
+    if (not math.isfinite(args.initial_forward_cap) or
+            not 0. < args.initial_forward_cap <= 1.):
+        parser.error("--initial-forward-cap must be above 0 and no greater than 1")
+    if args.initial_forward_thrust > 0. and args.initial_forward_steps < 1:
+        parser.error("--initial-forward-steps must be positive when startup thrust is used")
     if args.trt_encoder is not None and args.fp16_encoder:
         parser.error("choose either --trt-encoder or --fp16-encoder")
 

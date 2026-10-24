@@ -299,17 +299,53 @@ def apply_runtime_steering_config(cfg, steering_offset=None, steering_limit=None
     return checkpoint_offset, checkpoint_limit
 
 
+def _runtime_action(policy_action, steering_scale, throttle_scale, step_index,
+                    initial_forward_thrust, initial_forward_steps,
+                    initial_forward_cap):
+    steering = max(-1., min(1., float(policy_action[0]) * steering_scale))
+    throttle = float(policy_action[1]) * throttle_scale
+    if step_index < initial_forward_steps and initial_forward_thrust > 0.:
+        # Forward is negative on this car. Add a negative startup bias, then
+        # limit its forward magnitude so the initial pulse remains bounded.
+        throttle = max(-initial_forward_cap, throttle - initial_forward_thrust)
+    return steering, max(-1., min(1., throttle))
+
+
+def _validate_runtime_action_controls(throttle_scale, steering_scale,
+                                      initial_forward_thrust,
+                                      initial_forward_steps,
+                                      initial_forward_cap):
+    throttle_scale = float(throttle_scale)
+    steering_scale = float(steering_scale)
+    initial_forward_thrust = float(initial_forward_thrust)
+    initial_forward_steps = int(initial_forward_steps)
+    initial_forward_cap = float(initial_forward_cap)
+    if not math.isfinite(throttle_scale) or not 0. < throttle_scale <= 1.:
+        raise ValueError("Throttle scale must be above 0 and no greater than 1")
+    if not math.isfinite(steering_scale) or steering_scale <= 0.:
+        raise ValueError("Steering scale must be a positive finite number")
+    if not math.isfinite(initial_forward_thrust) or not 0. <= initial_forward_thrust <= 1.:
+        raise ValueError("Initial forward thrust must be from 0 to 1")
+    if initial_forward_steps < 0:
+        raise ValueError("Initial forward steps must be zero or positive")
+    if not math.isfinite(initial_forward_cap) or not 0. < initial_forward_cap <= 1.:
+        raise ValueError("Initial forward cap must be above 0 and no greater than 1")
+    if initial_forward_thrust > 0. and initial_forward_steps < 1:
+        raise ValueError("Initial forward steps must be positive when startup thrust is used")
+    return (throttle_scale, steering_scale, initial_forward_thrust,
+            initial_forward_steps, initial_forward_cap)
+
+
 def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
                    stop_head=None, stop_decision=None, warmup_s=.5,
                    maximum_steps=400, throttle_scale=1., telemetry_callback=None,
-                   steering_scale=1.):
+                   steering_scale=1., initial_forward_thrust=0.,
+                   initial_forward_steps=0, initial_forward_cap=1.):
     """Run the deterministic policy without recording, rewards, or updates."""
-    throttle_scale = float(throttle_scale)
-    if not 0. < throttle_scale <= 1.:
-        raise ValueError("Follow throttle scale must be above 0 and no greater than 1")
-    steering_scale = float(steering_scale)
-    if not math.isfinite(steering_scale) or steering_scale <= 0.:
-        raise ValueError("Follow steering scale must be a positive finite number")
+    (throttle_scale, steering_scale, initial_forward_thrust,
+     initial_forward_steps, initial_forward_cap) = _validate_runtime_action_controls(
+         throttle_scale, steering_scale, initial_forward_thrust,
+         initial_forward_steps, initial_forward_cap)
     control_hz = float(cfg["control"]["hz"])
     period = 1. / control_hz
     hidden = None
@@ -359,6 +395,11 @@ def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
     if steering_scale != 1.:
         print("FOLLOWING: steering output scaled to {:.0f}%.".format(
             steering_scale * 100.), flush=True)
+    if initial_forward_thrust > 0.:
+        print("FOLLOWING: adding -{:.3f} forward throttle for the first {} actions; "
+              "forward magnitude capped at {:.3f}.".format(
+                  initial_forward_thrust, initial_forward_steps,
+                  initial_forward_cap), flush=True)
     while applied_steps < int(maximum_steps):
         frame = camera.read(after=last_id, timeout=max(
             2., cfg["control"]["max_frame_age_s"]))
@@ -398,8 +439,9 @@ def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
             raise RuntimeError("Frame too old after policy inference: {:.0f}ms > {:.0f}ms".format(
                 frame_age_s * 1000., cfg["control"]["max_frame_age_s"] * 1000.))
         policy_action = tuple(float(item) for item in action[0, 0].cpu().tolist())
-        scaled_steering = max(-1., min(1., policy_action[0] * steering_scale))
-        requested = (scaled_steering, policy_action[1] * throttle_scale)
+        requested = _runtime_action(
+            policy_action, steering_scale, throttle_scale, applied_steps,
+            initial_forward_thrust, initial_forward_steps, initial_forward_cap)
         command = car.apply(requested)
         applied = tuple(float(item) for item in command["normalized"])
         if max(abs(requested[index] - applied[index]) for index in range(2)) > .02:
@@ -442,14 +484,13 @@ def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
 def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
                     backend="pytorch", stop_head=None, stop_decision=None,
                     warmup_s=.5, maximum_steps=400, throttle_scale=1.,
-                    steering_scale=1.):
+                    steering_scale=1., initial_forward_thrust=0.,
+                    initial_forward_steps=0, initial_forward_cap=1.):
     """Collect one autonomous on-policy episode and ask for a terminal score."""
-    throttle_scale = float(throttle_scale)
-    if not math.isfinite(throttle_scale) or not 0. < throttle_scale <= 1.:
-        raise ValueError("PPO throttle scale must be above 0 and no greater than 1")
-    steering_scale = float(steering_scale)
-    if not math.isfinite(steering_scale) or steering_scale <= 0.:
-        raise ValueError("PPO steering scale must be a positive finite number")
+    (throttle_scale, steering_scale, initial_forward_thrust,
+     initial_forward_steps, initial_forward_cap) = _validate_runtime_action_controls(
+         throttle_scale, steering_scale, initial_forward_thrust,
+         initial_forward_steps, initial_forward_cap)
     control_hz = float(cfg["control"]["hz"])
     period = 1. / control_hz
     hidden = None
@@ -504,6 +545,11 @@ def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
     if steering_scale != 1.:
         print("RUNNING: steering output scaled to {:.0f}%.".format(
             steering_scale * 100.), flush=True)
+    if initial_forward_thrust > 0.:
+        print("RUNNING: adding -{:.3f} forward throttle for the first {} actions; "
+              "forward magnitude capped at {:.3f}.".format(
+                  initial_forward_thrust, initial_forward_steps,
+                  initial_forward_cap), flush=True)
     while len(data["rewards"]) < int(maximum_steps):
         frame = camera.read(after=last_id, timeout=max(2., cfg["control"]["max_frame_age_s"]))
         last_id = frame["frame_id"]
@@ -539,10 +585,9 @@ def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
             raise RuntimeError("Frame too old after PPO inference: {:.0f}ms > {:.0f}ms".format(
                 frame_age_s * 1000., cfg["control"]["max_frame_age_s"] * 1000.))
         sampled = tuple(float(value) for value in action[0, 0].cpu().tolist())
-        requested = (
-            max(-1., min(1., sampled[0] * steering_scale)),
-            sampled[1] * throttle_scale,
-        )
+        requested = _runtime_action(
+            sampled, steering_scale, throttle_scale, len(data["rewards"]),
+            initial_forward_thrust, initial_forward_steps, initial_forward_cap)
         command = car.apply(requested)
         applied = tuple(float(value) for value in command["normalized"])
         if max(abs(requested[index] - applied[index]) for index in range(2)) > .02:
@@ -614,6 +659,9 @@ def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
         "runtime_action_transform": {
             "steering_scale": steering_scale,
             "throttle_scale": throttle_scale,
+            "initial_forward_thrust": initial_forward_thrust,
+            "initial_forward_steps": initial_forward_steps,
+            "initial_forward_cap": initial_forward_cap,
             "steering_offset": float(cfg["hardware"]["steering_offset"]),
             "steering_limit": float(cfg["limits"]["steering"]),
         },
@@ -656,7 +704,8 @@ def run_physical_loop(checkpoint, run_dir, device="cuda", trt_encoder=None, stop
                       maximum_updates=0, maximum_episodes=0, warmup_s=.5,
                       max_frame_age_ms=None, fp16_encoder=False, episodes_per_update=5,
                       steering_offset=None, steering_scale=1., steering_limit=None,
-                      throttle_scale=1.):
+                      throttle_scale=1., initial_forward_thrust=0.,
+                      initial_forward_steps=0, initial_forward_cap=1.):
     """Keep camera/driver open while collecting, scoring, and updating PPO."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -680,6 +729,10 @@ def run_physical_loop(checkpoint, run_dir, device="cuda", trt_encoder=None, stop
         checkpoint_limit, float(cfg["limits"]["steering"])), flush=True)
     print("Steering scale: {:.3f}".format(float(steering_scale)), flush=True)
     print("Throttle scale: {:.3f}".format(float(throttle_scale)), flush=True)
+    if float(initial_forward_thrust) > 0.:
+        print("Initial forward throttle: bias=-{:.3f} steps={} cap={:.3f}".format(
+            float(initial_forward_thrust), int(initial_forward_steps),
+            float(initial_forward_cap)), flush=True)
     backend = _configure_inference_backend(
         model, saved, device, trt_encoder, fp16_encoder)
     print("Inference backend: {}".format(backend), flush=True)
@@ -709,7 +762,8 @@ def run_physical_loop(checkpoint, run_dir, device="cuda", trt_encoder=None, stop
             rollout, exit_requested = collect_episode(
                 model, saved, checkpoint, cfg, camera, car, keys, device, backend,
                 stop_head, stop_decision, warmup_s, maximum_steps,
-                throttle_scale, steering_scale)
+                throttle_scale, steering_scale, initial_forward_thrust,
+                initial_forward_steps, initial_forward_cap)
             if exit_requested:
                 break
             if rollout is not None:

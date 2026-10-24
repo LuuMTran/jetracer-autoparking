@@ -255,10 +255,23 @@ def validate_rollout(rollout, checkpoint_saved, checkpoint_sha256=None):
     transform = rollout.get("runtime_action_transform", {})
     steering_scale = float(transform.get("steering_scale", 1.))
     throttle_scale = float(transform.get("throttle_scale", 1.))
+    initial_forward_thrust = float(transform.get("initial_forward_thrust", 0.))
+    initial_forward_steps_value = transform.get("initial_forward_steps", 0)
+    initial_forward_steps = int(initial_forward_steps_value)
+    initial_forward_cap = float(transform.get("initial_forward_cap", 1.))
     if not math.isfinite(steering_scale) or steering_scale <= 0.:
         raise ValueError("Invalid rollout steering scale")
     if not math.isfinite(throttle_scale) or not 0. < throttle_scale <= 1.:
         raise ValueError("Invalid rollout throttle scale")
+    if (not math.isfinite(initial_forward_thrust) or
+            not 0. <= initial_forward_thrust <= 1.):
+        raise ValueError("Invalid rollout initial forward thrust")
+    if initial_forward_steps != initial_forward_steps_value or initial_forward_steps < 0:
+        raise ValueError("Invalid rollout initial forward steps")
+    if not math.isfinite(initial_forward_cap) or not 0. < initial_forward_cap <= 1.:
+        raise ValueError("Invalid rollout initial forward cap")
+    if initial_forward_thrust > 0. and initial_forward_steps < 1:
+        raise ValueError("Initial forward steps are required when rollout thrust is used")
     cfg = checkpoint_saved["config"]
     steering_offset = float(transform.get(
         "steering_offset", cfg["hardware"]["steering_offset"]))
@@ -272,6 +285,11 @@ def validate_rollout(rollout, checkpoint_saved, checkpoint_sha256=None):
     expected_applied = rollout["actions"].float().clone()
     expected_applied[:, 0] = (expected_applied[:, 0] * steering_scale).clamp(-1., 1.)
     expected_applied[:, 1] = expected_applied[:, 1] * throttle_scale
+    initial_count = min(initial_forward_steps, length)
+    if initial_count and initial_forward_thrust > 0.:
+        expected_applied[:initial_count, 1] = torch.clamp(
+            expected_applied[:initial_count, 1] - initial_forward_thrust,
+            min=-initial_forward_cap)
     physical_error = (rollout["applied_actions"].float() - expected_applied).abs().max()
     if float(physical_error) > .021:
         raise ValueError("Applied motor action differs from the recorded runtime transform")
@@ -290,6 +308,9 @@ def load_rollouts(paths, checkpoint, checkpoint_saved):
         signature = (
             float(transform.get("steering_scale", 1.)),
             float(transform.get("throttle_scale", 1.)),
+            float(transform.get("initial_forward_thrust", 0.)),
+            int(transform.get("initial_forward_steps", 0)),
+            float(transform.get("initial_forward_cap", 1.)),
             float(transform.get("steering_offset", cfg["hardware"]["steering_offset"])),
             float(transform.get("steering_limit", cfg["limits"]["steering"])),
         )
