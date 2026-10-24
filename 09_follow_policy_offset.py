@@ -24,21 +24,30 @@ def follow(args):
 
     checkpoint_offset = float(cfg["hardware"]["steering_offset"])
     checkpoint_limit = float(cfg["limits"]["steering"])
+    if args.steering_limit is not None:
+        cfg["limits"]["steering"] = float(args.steering_limit)
     if args.steering_offset is not None:
-        offset = float(args.steering_offset)
-        gain = float(cfg["hardware"]["steering_gain"])
-        cfg["hardware"]["steering_offset"] = offset
-        safe_limit = (1. - abs(offset)) / abs(gain)
-        if float(cfg["limits"]["steering"]) > safe_limit:
+        cfg["hardware"]["steering_offset"] = float(args.steering_offset)
+    offset = float(cfg["hardware"]["steering_offset"])
+    gain = float(cfg["hardware"]["steering_gain"])
+    requested_limit = float(cfg["limits"]["steering"])
+    safe_limit = (1. - abs(offset)) / abs(gain)
+    if requested_limit > safe_limit:
+        if args.steering_limit is not None:
+            raise ValueError("--steering-limit {:.3f} is unsafe with offset {:+.3f} and "
+                             "gain {:+.3f}; maximum safe limit is {:.3f}".format(
+                                 requested_limit, offset, gain, safe_limit))
+        else:
             cfg["limits"]["steering"] = safe_limit
             print("Steering limit reduced from {:.3f} to {:.3f} to keep the driver "
-                  "within range.".format(checkpoint_limit, safe_limit), flush=True)
+                  "within range.".format(requested_limit, safe_limit), flush=True)
 
     print("FOLLOW CHECKPOINT: {}".format(checkpoint), flush=True)
     print("Steering offset: checkpoint={:+.3f} runtime={:+.3f}".format(
         checkpoint_offset, float(cfg["hardware"]["steering_offset"])), flush=True)
     print("Steering limit: checkpoint={:.3f} runtime={:.3f}".format(
         checkpoint_limit, float(cfg["limits"]["steering"])), flush=True)
+    print("Steering scale: {:.3f}".format(args.steering_scale), flush=True)
     print("Throttle scale: {:.3f}".format(args.throttle_scale), flush=True)
 
     backend = _configure_inference_backend(
@@ -64,7 +73,7 @@ def follow(args):
             reason, exit_requested, steps = follow_episode(
                 model, cfg, camera, car, keys, args.device, backend, stop_head,
                 stop_decision, args.warmup_seconds, maximum_steps,
-                args.throttle_scale)
+                args.throttle_scale, steering_scale=args.steering_scale)
             completed_runs += 1
             print("FOLLOW STOPPED: {} after {} applied actions".format(
                 reason, steps), flush=True)
@@ -77,6 +86,7 @@ def follow(args):
         "runs_completed": completed_runs,
         "steering_offset": float(cfg["hardware"]["steering_offset"]),
         "steering_limit": float(cfg["limits"]["steering"]),
+        "steering_scale": float(args.steering_scale),
         "throttle_scale": float(args.throttle_scale),
         "mode": "deterministic_follow_with_runtime_calibration",
     }
@@ -96,6 +106,10 @@ def main(argv=None):
                         help="Multiply policy throttle at runtime (above 0 to 1)")
     parser.add_argument("--steering-offset", type=float,
                         help="Override hardware steering offset (-0.6 to 0.6)")
+    parser.add_argument("--steering-scale", type=float, default=1.,
+                        help="Multiply policy steering before limiting (default 1)")
+    parser.add_argument("--steering-limit", type=float,
+                        help="Override physical steering limit (above 0 to 1)")
     parser.add_argument("--warmup-seconds", type=float, default=.5)
     parser.add_argument("--max-frame-age-ms", type=float)
     args = parser.parse_args(argv)
@@ -107,6 +121,11 @@ def main(argv=None):
             parser.error("--steering-offset must be finite")
         if abs(args.steering_offset) > .6:
             parser.error("--steering-offset must be from -0.6 to 0.6")
+    if not math.isfinite(args.steering_scale) or args.steering_scale <= 0.:
+        parser.error("--steering-scale must be a positive finite number")
+    if args.steering_limit is not None:
+        if not math.isfinite(args.steering_limit) or not 0. < args.steering_limit <= 1.:
+            parser.error("--steering-limit must be above 0 and no greater than 1")
     if args.trt_encoder is not None and args.fp16_encoder:
         parser.error("choose either --trt-encoder or --fp16-encoder")
 

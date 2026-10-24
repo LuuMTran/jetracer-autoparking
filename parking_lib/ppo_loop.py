@@ -277,11 +277,15 @@ def _runtime_config(saved, max_frame_age_ms=None):
 
 def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
                    stop_head=None, stop_decision=None, warmup_s=.5,
-                   maximum_steps=400, throttle_scale=1., telemetry_callback=None):
+                   maximum_steps=400, throttle_scale=1., telemetry_callback=None,
+                   steering_scale=1.):
     """Run the deterministic policy without recording, rewards, or updates."""
     throttle_scale = float(throttle_scale)
     if not 0. < throttle_scale <= 1.:
         raise ValueError("Follow throttle scale must be above 0 and no greater than 1")
+    steering_scale = float(steering_scale)
+    if not math.isfinite(steering_scale) or steering_scale <= 0.:
+        raise ValueError("Follow steering scale must be a positive finite number")
     control_hz = float(cfg["control"]["hz"])
     period = 1. / control_hz
     hidden = None
@@ -328,6 +332,9 @@ def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
     if throttle_scale != 1.:
         print("FOLLOWING: throttle output scaled to {:.0f}%.".format(
             throttle_scale * 100.), flush=True)
+    if steering_scale != 1.:
+        print("FOLLOWING: steering output scaled to {:.0f}%.".format(
+            steering_scale * 100.), flush=True)
     while applied_steps < int(maximum_steps):
         frame = camera.read(after=last_id, timeout=max(
             2., cfg["control"]["max_frame_age_s"]))
@@ -367,7 +374,8 @@ def follow_episode(model, cfg, camera, car, keys, device, backend="pytorch",
             raise RuntimeError("Frame too old after policy inference: {:.0f}ms > {:.0f}ms".format(
                 frame_age_s * 1000., cfg["control"]["max_frame_age_s"] * 1000.))
         policy_action = tuple(float(item) for item in action[0, 0].cpu().tolist())
-        requested = (policy_action[0], policy_action[1] * throttle_scale)
+        scaled_steering = max(-1., min(1., policy_action[0] * steering_scale))
+        requested = (scaled_steering, policy_action[1] * throttle_scale)
         command = car.apply(requested)
         applied = tuple(float(item) for item in command["normalized"])
         if max(abs(requested[index] - applied[index]) for index in range(2)) > .02:
