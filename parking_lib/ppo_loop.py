@@ -228,6 +228,32 @@ def save_rollout(run_dir, rollout):
     return destination
 
 
+def quarantine_mismatched_rollouts(paths, checkpoint, checkpoint_saved, run_dir):
+    """Move stale rollouts aside and return those belonging to this checkpoint."""
+    checkpoint_hash = ppo.file_sha256(checkpoint)
+    expected_update = int(checkpoint_saved["update"])
+    valid = []
+    quarantined = []
+    quarantine = Path(run_dir) / "rollouts" / "quarantine" / "update_{:04d}".format(
+        expected_update)
+    for path in paths:
+        artifact = load_checkpoint(path, "cpu")
+        matches = (
+            int(artifact.get("policy_update", -1)) == expected_update and
+            artifact.get("policy_checkpoint_sha256") == checkpoint_hash
+        )
+        if matches:
+            valid.append(path)
+            continue
+        quarantine.mkdir(parents=True, exist_ok=True)
+        destination = quarantine / path.name
+        if destination.exists():
+            destination = quarantine / "{}_{}.pt".format(path.stem, uuid.uuid4().hex[:8])
+        path.replace(destination)
+        quarantined.append(destination)
+    return valid, quarantined
+
+
 def _image_input(rgb, device, backend):
     dtype = torch.float16 if backend in (
         "tensorrt-fp16-encoder", "pytorch-fp16-encoder") else torch.float32
@@ -684,6 +710,11 @@ def collect_episode(model, saved, checkpoint, cfg, camera, car, keys, device,
 
 def update_when_ready(model, saved, checkpoint, run_dir, device, minimum_episodes):
     paths = rollout_paths(run_dir, saved["update"])
+    paths, quarantined = quarantine_mismatched_rollouts(
+        paths, checkpoint, saved, run_dir)
+    if quarantined:
+        print("ROLLOUT QUARANTINE: moved {} stale episode(s) to {}".format(
+            len(quarantined), quarantined[0].parent), flush=True)
     if len(paths) < int(minimum_episodes):
         return checkpoint, saved, None
     rollouts = ppo.load_rollouts(paths, checkpoint, saved)
